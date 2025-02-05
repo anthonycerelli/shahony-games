@@ -5,6 +5,28 @@ const BASE_HEIGHT = 600;
 // Global socket variable.
 let socket;
 
+// A very simple seeded random function.
+function seededRandom(seed) {
+  // Create a pseudo-random number between 0 and 1 based on the seed.
+  const x = Math.sin(seed) * 10000;
+  return x - Math.floor(x);
+}
+
+// Generate a fixed set of obstacle positions using a constant seed.
+function getObstaclePositions() {
+  const OBSTACLE_SEED = 12345;  // Change this seed to get a different layout.
+  const positions = [];
+  let seed = OBSTACLE_SEED;
+  // For example, create 7 obstacles.
+  for (let i = 0; i < 7; i++) {
+    // Use the seededRandom function to generate x and y positions.
+    const x = 50 + seededRandom(seed++) * (BASE_WIDTH - 100);
+    const y = 50 + seededRandom(seed++) * (BASE_HEIGHT - 100);
+    positions.push({ x, y });
+  }
+  return positions;
+}
+
 class MainScene extends Phaser.Scene {
   constructor() {
     super({ key: 'MainScene' });
@@ -52,6 +74,7 @@ class MainScene extends Phaser.Scene {
     this.gameStarted = false;  // Starts in lobby mode.
     this.isHost = false;       // Determined by Socket.IO join order.
     this.playerName = "Player" + Math.floor(Math.random() * 1000);
+    this.isDead = false;
     
     // --- Player ---
     // Spawn the local player at the center (safe zone).
@@ -76,11 +99,11 @@ class MainScene extends Phaser.Scene {
       gfx.fillRect(0, 0, 60, 60);
       gfx.generateTexture('tree', 60, 60);
     }
-    // Place obstacles avoiding the central safe zone (a circle of radius 150).
-    for (let i = 0; i < 7; i++) {
-      let pos = this.getValidSpawnPoint(150, 0);
+    // Create obstacles using a fixed seed so all clients have the same layout.
+    const obstaclePositions = getObstaclePositions();
+    obstaclePositions.forEach((pos) => {
       this.obstacles.create(pos.x, pos.y, 'tree');
-    }
+    });
     // Boundary obstacles.
     const boundaryThickness = 20;
     const topBottomScaleX = BASE_WIDTH / 60;
@@ -124,7 +147,29 @@ class MainScene extends Phaser.Scene {
     this.statusText.setVisible(false);
     
     // --- Multiplayer: Socket.IO Integration ---
-    socket = io('http://localhost:3000');  // Ensure this is your server's address.
+    // socket = io('http://localhost:3000');  // Ensure this is your server's address.
+    // Simple UUID generator (or you can use a library like uuid)
+    function generateUUID() {
+      return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        let r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+    }
+
+    // Check for a persistent id in localStorage
+    let persistentId = localStorage.getItem('userId');
+    if (!persistentId) {
+      persistentId = generateUUID();
+      localStorage.setItem('userId', persistentId);
+    }
+    
+    // Save the persistentId to the scene so you can use it later.
+    this.myUserId = persistentId;
+
+    // Connect with Socket.IO, passing the persistent user id as a query parameter.
+    socket = io('http://192.168.100.127:3000', {
+      query: { userId: persistentId }
+    }); 
     this.playerCount = 0;
 
     socket.on('connect', () => {
@@ -132,27 +177,31 @@ class MainScene extends Phaser.Scene {
       // Save the socket id into a scene property.
       this.mySocketId = socket.id;
       
-      // Now register all events that depend on socket.id.
       socket.on('currentPlayers', (players) => {
         console.log("Current players received:", players);
         // Set local player number using the stored socket id.
-        if (players[this.mySocketId] && players[this.mySocketId].number !== undefined) {
-          this.myPlayerNumber = players[this.mySocketId].number;
-        } else {
-          this.myPlayerNumber = 1;
+        if (players[this.myUserId] && players[this.myUserId].number !== undefined) {
+          this.myPlayerNumber = players[this.myUserId].number;
         }
-        // Update the player count.
-        this.playerCount = Object.keys(players).length;
-        // Determine host: if your assigned number is 1, you're the host.
-        this.isHost = (this.myPlayerNumber === 1);
+        
+        // Find the lowest player number among connected players.
+        let lowest = Infinity;
+        for (const id in players) {
+          if (players[id].number < lowest) {
+            lowest = players[id].number;
+          }
+        }
+        // You are host if your player number equals the lowest.
+        this.isHost = (this.myPlayerNumber === lowest);
         this.updateLobbyUI();
         // Add all other players.
         Object.values(players).forEach((player) => {
-          if (player.playerId !== this.mySocketId) {
+          if (player.socketId !== this.mySocketId) {  // <-- Fixed property check
             this.addOtherPlayer(player);
           }
         });
       });
+      
       
       socket.on('newPlayer', (playerInfo) => {
         this.addOtherPlayer(playerInfo);
@@ -162,16 +211,23 @@ class MainScene extends Phaser.Scene {
       
       socket.on('playerMoved', (playerInfo) => {
         this.otherPlayers.getChildren().forEach((otherPlayer) => {
-          if (playerInfo.playerId === otherPlayer.playerId) {
+          if (playerInfo.userId === otherPlayer.userId) {
             otherPlayer.setPosition(playerInfo.x, playerInfo.y);
             otherPlayer.rotation = playerInfo.rotation;
           }
         });
       });
       
-      socket.on('playerDisconnected', (playerId) => {
+      socket.on('gameOver', () => {
+        this.gameOver = true;
+        this.statusText.setText('Game Over!\nPress R to Restart');
+        this.statusText.setVisible(true);
+        this.children.bringToTop(this.statusText);
+      });      
+      
+      socket.on('playerDisconnected', (userId) => {
         this.otherPlayers.getChildren().forEach((otherPlayer) => {
-          if (playerId === otherPlayer.playerId) {
+          if (userId === otherPlayer.userId) {
             otherPlayer.destroy();
           }
         });
@@ -195,6 +251,13 @@ class MainScene extends Phaser.Scene {
         socket.disconnect();
         window.location.reload();
       });
+
+      window.addEventListener('beforeunload', () => {
+        if (socket) {
+          socket.disconnect();
+        }
+      });
+      
     });
 
   }
@@ -226,7 +289,7 @@ class MainScene extends Phaser.Scene {
     // If game over, allow reset.
     if (this.gameOver) {
       if (Phaser.Input.Keyboard.JustDown(this.restartKey)) {
-        socket.emit('resetGame');
+        // Force a disconnect before reloading so the old connection is cleaned up.
         socket.disconnect();
         window.location.reload();
       }
@@ -259,9 +322,9 @@ class MainScene extends Phaser.Scene {
       let playerNum = (this.myPlayerNumber !== undefined) ? this.myPlayerNumber : "?";
       
       if (this.isHost) {
-        this.lobbyText.setText('Lobby: You are HOST (Player ' + playerNum + '), ' + this.playerName + '.\nPress S to Start');
+        this.lobbyText.setText('Lobby: You are HOST (Player ' + playerNum + ')'+ '.\nPress S to Start');
       } else {
-        this.lobbyText.setText('Lobby: You are Player ' + playerNum + ' (' + this.playerName + ').\nWaiting for host to start');
+        this.lobbyText.setText('Lobby: You are Player ' + playerNum + '.\nWaiting for host to start');
       }
       this.lobbyCountText.setText('Players in Lobby: ' + this.playerCount);
       this.lobbyText.setVisible(true);
@@ -275,6 +338,10 @@ class MainScene extends Phaser.Scene {
   
   // Helper to update local player's movement.
   updateLocalMovement() {
+    // Skip movement updates if the player is dead or if the body is missing.
+    if (this.isDead || !this.player || !this.player.body) {
+      return;
+    }
     let moveX = (this.cursors.right.isDown ? 1 : 0) - (this.cursors.left.isDown ? 1 : 0);
     let moveY = (this.cursors.down.isDown ? 1 : 0) - (this.cursors.up.isDown ? 1 : 0);
     let speed = 220;
@@ -294,6 +361,7 @@ class MainScene extends Phaser.Scene {
       this.player.anims.play('turn');
     }
   }
+  
   
   // Helper to update enemy chase behavior with obstacle avoidance and separation.
   updateEnemyChase(enemy) {
@@ -346,7 +414,7 @@ class MainScene extends Phaser.Scene {
   // Helper to add remote players.
   addOtherPlayer(playerInfo) {
     const otherPlayer = this.physics.add.sprite(playerInfo.x, playerInfo.y, 'dude');
-    otherPlayer.playerId = playerInfo.playerId;
+    otherPlayer.userId = playerInfo.userId;
     otherPlayer.setTint(0x0000ff);
     otherPlayer.body.setSize(20, 30);
     otherPlayer.body.setOffset(6, 9);
@@ -502,37 +570,31 @@ class MainScene extends Phaser.Scene {
   }
   
   handleEnemySprayHit(spray, player) {
-    // Only process if the game is not already over.
-    if (this.gameOver) return;
+    // Only process if this player is not already dead.
+    if (!spray.active || !player.active || this.isDead) return;
     
-    // spray.destroy(); 
+    // Mark this player as dead and notify the server.
+    this.isDead = true;
+    socket.emit('playerDied');
+    
+    // Change appearance to show damage.
     player.setTint(0xff0000);
-    this.gameOver = true;
-    
-    // Update the player's appearance.
     player.anims.stop();
     
-    // Display Game Over text.
-    this.statusText.setText('Game Over!\nPress R to Restart');
-    this.statusText.setVisible(true);
-    this.children.bringToTop(this.statusText);
+    // (You may want to stop further input here, but do not display Game Over text yet.)
+    spray.destroy();
   }
   
   handlePlayerEnemyCollision(player, enemy) {
-    // Only process if the game is not already over.
-    if (this.gameOver) return;
+    if (this.isDead) return;
     
-    this.gameOver = true;
+    this.isDead = true;
+    socket.emit('playerDied');
     
-    // Update the player's appearance.
     player.setTint(0xff0000);
     player.anims.stop();
-    
-    // Display Game Over text.
-    this.statusText.setText('Game Over!\nPress R to Restart');
-    this.statusText.setVisible(true);
-    this.children.bringToTop(this.statusText);
-  }
+    // Do not display Game Over text until the server signals that all players have lost.
+  }  
    
   
   changeEnemyDirections() {
