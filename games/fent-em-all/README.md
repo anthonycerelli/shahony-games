@@ -25,3 +25,10 @@ This is the first game of the Euclid games pack, inspired by our experiences liv
 ## Tests
 
 - Unit tests, integration tests, etc.
+
+
+## Versioning on server
+-- npm : 10.9.2
+-- node: 22.13.1
+-- socket.io: 4.8.1
+-- express: 4.21.2
