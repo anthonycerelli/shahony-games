@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>First Person Dart Game</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.module.js"
+        }
+      }
+    </script>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #202030;
+      }
+      #instructions {
+        position: absolute;
+        top: 50%;
+        width: 100%;
+        text-align: center;
+        color: white;
+        font-family: Arial, sans-serif;
+        font-size: 24px;
+        cursor: pointer;
+        user-select: none;
+      }
+      #score {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        color: white;
+        font-family: Arial, sans-serif;
+        font-size: 24px;
+      }
+      #wind {
+        position: absolute;
+        top: 20px;
+        right: 20px;
+        color: white;
+        font-family: Arial, sans-serif;
+        font-size: 24px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="instructions">
+      Click to Play<br />
+      Use WASD to move and click to throw a dart.
+    </div>
+    <div id="score">Score: 0</div>
+    <div id="wind" style="opacity: 0; transition: opacity 0.5s;">Wind: (0, 0)</div>
+
+    <!-- Use type="module" for ES module support -->
+    <script type="module">
+      import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.module.js';
+      import { PointerLockControls } from 'https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/controls/PointerLockControls.js';
+
+      // Global variables
+      let scene, camera, renderer, controls;
+      const movingDarts = []; // darts still in flight
+      let dartBoard; // our target board
+      const clock = new THREE.Clock();
+      let score = 0;
+      const scoreElement = document.getElementById("score");
+      const windElement = document.getElementById("wind");
+
+      // Movement flags for WASD
+      let moveForward = false,
+          moveBackward = false,
+          moveLeft = false,
+          moveRight = false;
+
+      init();
+      animate();
+
+      function init() {
+        // Create scene and camera
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x202030);
+        scene.fog = new THREE.FogExp2(0x202030, 0.02);
+
+        camera = new THREE.PerspectiveCamera(
+          75,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          1000
+        );
+
+        // Create renderer
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Add lights
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+        directionalLight.position.set(1, 1, 1);
+        scene.add(directionalLight);
+
+        // Create a ground
+        const groundGeometry = new THREE.PlaneGeometry(200, 200);
+        const groundMaterial = new THREE.MeshPhongMaterial({ color: 0x808080 });
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2;
+        scene.add(ground);
+
+        // Set up Pointer Lock Controls
+        controls = new PointerLockControls(camera, document.body);
+        const instructions = document.getElementById("instructions");
+        instructions.addEventListener("click", () => {
+          controls.lock();
+        });
+        controls.addEventListener("lock", () => {
+          instructions.style.display = "none";
+        });
+        controls.addEventListener("unlock", () => {
+          instructions.style.display = "";
+        });
+        scene.add(controls.getObject());
+
+        // Position the camera (player height ~1.6)
+        camera.position.set(0, 1.6, 5);
+
+        // Create our dart board target (multi-colored)
+        createDartBoard();
+
+        // Listen for mouse clicks to throw darts
+        window.addEventListener("click", onMouseClick, false);
+        window.addEventListener("resize", onWindowResize, false);
+
+        // Set up keyboard controls
+        document.addEventListener("keydown", onKeyDown, false);
+        document.addEventListener("keyup", onKeyUp, false);
+      }
+
+      function onKeyDown(event) {
+        switch (event.code) {
+          case "KeyW":
+            moveForward = true;
+            break;
+          case "KeyA":
+            moveLeft = true;
+            break;
+          case "KeyS":
+            moveBackward = true;
+            break;
+          case "KeyD":
+            moveRight = true;
+            break;
+        }
+      }
+
+      function onKeyUp(event) {
+        switch (event.code) {
+          case "KeyW":
+            moveForward = false;
+            break;
+          case "KeyA":
+            moveLeft = false;
+            break;
+          case "KeyS":
+            moveBackward = false;
+            break;
+          case "KeyD":
+            moveRight = false;
+            break;
+        }
+      }
+
+      // Create a multi-colored dart board using a canvas texture.
+      // The rings (from outside in) are: white, black, blue, red, yellow.
+      // Later we’ll use these sections for different scores.
+      function createDartBoard() {
+        const size = 512;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const context = canvas.getContext("2d");
+
+        // Draw a white background (for extra brightness)
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, size, size);
+
+        const centerX = size / 2;
+        const centerY = size / 2;
+        const outerRadius = size / 2 - 10;
+
+        // Define ring colors (outermost to bullseye)
+        const ringColors = [
+          "#ffffff", // outer ring: white
+          "#000000", // next ring: black
+          "#0000FF", // then blue
+          "#FF0000", // then red
+          "#FFFF00"  // bullseye: yellow
+        ];
+        const numRings = ringColors.length;
+
+        // Draw concentric rings
+        for (let i = 0; i < numRings; i++) {
+          const radius = outerRadius * (1 - i / numRings);
+          context.beginPath();
+          context.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+          context.fillStyle = ringColors[i];
+          context.fill();
+        }
+
+        const texture = new THREE.CanvasTexture(canvas);
+        const geometry = new THREE.PlaneGeometry(3, 3);
+        const material = new THREE.MeshBasicMaterial({ map: texture });
+        dartBoard = new THREE.Mesh(geometry, material);
+
+        // Position the dartboard on a wall (10 units in front of the origin)
+        dartBoard.position.set(0, 1.6, -10);
+        scene.add(dartBoard);
+      }
+
+      // Create a dart object as a THREE.Group, combining a cylinder (body) and a cone (tip)
+      function createDart() {
+        const dart = new THREE.Group();
+
+        // Dart body: a thin cylinder (length 0.4)
+        const bodyGeom = new THREE.CylinderGeometry(0.01, 0.01, 0.4, 8);
+        const bodyMat = new THREE.MeshPhongMaterial({ color: 0xffaa00 });
+        const body = new THREE.Mesh(bodyGeom, bodyMat);
+        // By default, CylinderGeometry is centered; shift it so one end is at the origin.
+        body.position.y = 0.2;
+        dart.add(body);
+
+        // Dart tip: a cone
+        const tipGeom = new THREE.ConeGeometry(0.02, 0.1, 8);
+        const tipMat = new THREE.MeshPhongMaterial({ color: 0x333333 });
+        const tip = new THREE.Mesh(tipGeom, tipMat);
+        tip.position.y = 0.45; // place the tip at the front of the body
+        dart.add(tip);
+
+        // Rotate the dart so that its length aligns with the X-axis.
+        dart.rotation.z = Math.PI / 2;
+        return dart;
+      }
+
+      // When the mouse is clicked, throw a dart.
+      function onMouseClick(event) {
+        // Only throw a dart when pointer is locked.
+        if (!controls.isLocked) return;
+
+        // Create the dart using our custom dart model.
+        const dart = createDart();
+
+        // Set its starting position at the camera’s (player’s) position.
+        dart.position.copy(camera.position);
+
+        // Determine initial velocity from the camera’s direction.
+        const dartSpeed = 20;
+        const dartVelocity = new THREE.Vector3();
+        camera.getWorldDirection(dartVelocity);
+        dartVelocity.multiplyScalar(dartSpeed);
+        dart.userData.velocity = dartVelocity;
+
+        // Gravity for the dart’s physics simulation.
+        dart.userData.gravity = new THREE.Vector3(0, -9.8, 0);
+
+        // Generate a random wind effect.
+        // Now with a wider range (-4 to 4 on both X and Z).
+        const windX = Math.random() * 8 - 4;
+        const windZ = Math.random() * 8 - 4;
+        dart.userData.wind = new THREE.Vector3(windX, 0, windZ);
+
+        // Display wind info onscreen (fade out after 2 seconds)
+        windElement.textContent = `Wind: (${windX.toFixed(1)}, ${windZ.toFixed(1)})`;
+        windElement.style.opacity = 1;
+        setTimeout(() => {
+          windElement.style.opacity = 0;
+        }, 2000);
+
+        // Mark this dart as "in flight"
+        movingDarts.push(dart);
+        scene.add(dart);
+      }
+
+      // Handle window resize events.
+      function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      // Main animation loop.
+      function animate() {
+        requestAnimationFrame(animate);
+        const delta = clock.getDelta();
+
+        // Update player movement if pointer is locked.
+        if (controls.isLocked) {
+          const moveSpeed = 5 * delta;
+          const forward = new THREE.Vector3();
+          camera.getWorldDirection(forward);
+          forward.y = 0;
+          forward.normalize();
+
+          const right = new THREE.Vector3();
+          right.crossVectors(camera.up, forward).normalize();
+
+          if (moveForward) camera.position.addScaledVector(forward, moveSpeed);
+          if (moveBackward) camera.position.addScaledVector(forward, -moveSpeed);
+          if (moveLeft) camera.position.addScaledVector(right, moveSpeed);
+          if (moveRight) camera.position.addScaledVector(right, -moveSpeed);
+        }
+
+        // Update moving darts.
+        for (let i = 0; i < movingDarts.length; i++) {
+          const dart = movingDarts[i];
+          // Apply gravity.
+          dart.userData.velocity.add(dart.userData.gravity.clone().multiplyScalar(delta));
+          // Apply wind.
+          dart.userData.velocity.add(dart.userData.wind.clone().multiplyScalar(delta));
+          // Update position.
+          dart.position.add(dart.userData.velocity.clone().multiplyScalar(delta));
+
+          // Simple collision detection with the dartboard.
+          // The board is assumed to be a vertical plane at (0, 1.6, -10).
+          // Its normal is (0, 0, 1) since it faces the camera.
+          const boardPos = dartBoard.position;
+          const vec = new THREE.Vector3().subVectors(dart.position, boardPos);
+          const distance = vec.dot(new THREE.Vector3(0, 0, 1));
+
+          // When the dart is near the board’s plane:
+          if (distance > -0.1 && distance < 0.1) {
+            // Convert dart's world position to the dartBoard’s local space.
+            const localPos = dart.position.clone();
+            dartBoard.worldToLocal(localPos);
+
+            // The dartboard is 3 units wide/high; half-size = 1.5.
+            // Determine the distance from the center.
+            const hitDistance = Math.sqrt(localPos.x * localPos.x + localPos.y * localPos.y);
+
+            // Only process hits within the board.
+            if (hitDistance < 1.5) {
+              // Determine the score based on which ring was hit.
+              // (Using board half-width = 1.5 as the outer radius)
+              // Thresholds:
+              //  > 1.2: white (1 point)
+              //  0.9 - 1.2: black (2 points)
+              //  0.6 - 0.9: blue (3 points)
+              //  0.3 - 0.6: red (4 points)
+              //  <= 0.3: yellow (10 points)
+              let points = 0;
+              if (hitDistance > 1.2) {
+                points = 1;
+              } else if (hitDistance > 0.9) {
+                points = 2;
+              } else if (hitDistance > 0.6) {
+                points = 3;
+              } else if (hitDistance > 0.3) {
+                points = 4;
+              } else {
+                points = 10;
+              }
+
+              console.log("Hit! +" + points);
+              score += points;
+              scoreElement.textContent = `Score: ${score}`;
+
+              // "Stick" the dart: Remove it from moving darts and attach it to the dartboard.
+              movingDarts.splice(i, 1);
+              i--; // adjust index
+
+              // Convert dart’s world position to local coordinates relative to dartBoard.
+              dart.position.copy(dartBoard.worldToLocal(dart.position.clone()));
+              dartBoard.add(dart);
+
+              // Stop further motion by clearing velocity.
+              dart.userData.velocity.set(0, 0, 0);
+              continue;
+            }
+          }
+
+          // Optionally, remove darts that have fallen below the ground.
+          if (dart.position.y < 0) {
+            scene.remove(dart);
+            movingDarts.splice(i, 1);
+            i--;
+          }
+        }
+
+        renderer.render(scene, camera);
+      }
+    </script>
+  </body>
+</html>
